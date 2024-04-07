@@ -1,61 +1,76 @@
+import torch
+import torch.nn as nn
+import torch.optim as optim
+from torch.optim.lr_scheduler import ReduceLROnPlateau
 import wandb
-from .model import SoundClassifier, SoundClassifierUpdated
+from .model import SoundClassifier, SoundClassifierUpdated, AudioClassifierWithTransformer
 from .dataset import CustomDataModule
-from .utils import test_model
-from torch import optim
-from pytorch_lightning import Trainer
+from .utils import test_model, train_one_epoch, validate_one_epoch
+import copy
+
+# Login to Weights & Biases
+wandb.login()
+
+# Common configuration for all experiments
+common_config = {
+    'num_epochs': 100,
+    'k_folds': 5,
+    'num_classes': 10,
+    'batch_size': 32,
+    'learning_rate': 1e-3,
+    'device': torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+    'input_length': 16000,
+    'num_workers': 2,
+    'data_directory': '',  # Specify your data directory here
+    'data_frame': None,  # Assign your DataFrame here
+    'sampling_rate': 44100,
+    'new_sampling_rate': 16000,
+    'sample_length_seconds': 1,
+    'file_column': 'filename',
+    'label_column': 'category',
+    'esc_10_flag': True
+}
+
+# Function to setup and return DataModule
+def setup_data_module(config, fold):
+    return CustomDataModule(
+        batch_size=config['batch_size'],
+        num_workers=config['num_workers'],
+        data_directory=config['data_directory'],
+        data_frame=config['data_frame'],
+        validation_fold=fold,
+        testing_fold=1,
+        esc_10_flag=config['esc_10_flag'],
+        file_column=config['file_column'],
+        label_column=config['label_column'],
+        sampling_rate=config['sampling_rate'],
+        new_sampling_rate=config['new_sampling_rate'],
+        sample_length_seconds=config['sample_length_seconds']
+    )
 
 #Architecture 1 : Before using dropout, early stopping and regularization
 def arch1_exp1():
-    from itertools import cycle
+    config = common_config.copy()
 
-    import wandb
-    wandb.login()
+    for fold in range(1, config['k_folds'] + 1):
+        if fold == 1:
+            continue
 
-    config = {
-      'num_epochs': 100,
-      'k_folds': 5,
-      'num_classes': 10,
-      'batch_size': 32,
-      'learning_rate': 1e-3,
-      'device': torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-      'input_length': 16000,
-      'num_workers':2
-    }
+        wandb.init(project='audio_classification_assn2', entity='m23csa001', config=config, name=f'CNN Fold {fold}', reinit=True)
 
-for fold in range(1, config['k_folds'] + 1):
-    if fold == 1:
-       continue
+        data_module = setup_data_module(config, fold)
+        data_module.setup(stage='fit', current_fold=fold)
+        train_loader = data_module.train_dataloader()
+        val_loader = data_module.val_dataloader()
 
-    wandb.init(project='audio_classification_assn2', entity='m23csa001',config=config, name=f'CNN Fold {fold}', reinit=True)
+        data_module.setup(stage='test', current_fold=1)
+        test_loader = data_module.test_dataloader()
 
-    data_module = CustomDataModule(batch_size=config['batch_size'],
-                                   num_workers=config['num_workers'],
-                                   data_directory=path,
-                                   data_frame=df,
-                                   validation_fold=fold,
-                                   testing_fold=1,
-                                   esc_10_flag=True,
-                                   file_column='filename',
-                                   label_column='category',
-                                   sampling_rate=44100,
-                                   new_sampling_rate=16000,
-                                   sample_length_seconds=1
-                                   )
-
-    data_module.setup(stage='fit', current_fold=fold)
-    train_loader = data_module.train_dataloader()
-    val_loader = data_module.val_dataloader()
-
-    data_module.setup(stage='test', current_fold=1)
-    test_loader = data_module.test_dataloader()
-
-    model_1 = SoundClassifier(sequence_length=config['input_length'],output_size=config['num_classes']).to(config['device'])
-
-    criterion = nn.CrossEntropyLoss()
-    optimizer = optim.Adam(model_1.parameters(), lr=config['learning_rate'])
-
-    for epoch in range(config['num_epochs']):
+        model = SoundClassifier(sequence_length=config['input_length'], output_size=config['num_classes']).to(config['device'])
+        criterion = nn.CrossEntropyLoss()
+        optimizer = optim.Adam(model.parameters(), lr=config['learning_rate'])
+        
+        for epoch in range(config['num_epochs']):
         train_loss, train_accuracy = trains_one_epoch(model_1, train_loader, criterion, optimizer, config['device'])
         val_loss, val_accuracy = validate_one_epoch(model_1, val_loader, criterion, config['device'])
         wandb.log({'train_loss': train_loss, 'train_accuracy': train_accuracy, 'val_loss': val_loss, 'val_accuracy': val_accuracy})
@@ -64,38 +79,23 @@ for fold in range(1, config['k_folds'] + 1):
            print(f'Fold {fold}, Epoch [{epoch+1}/{config["num_epochs"]}] - Training Loss: {train_loss:.4f}, Accuracy: {train_accuracy:.2f}%')
            print(f'Validation Loss: {val_loss:.4f}, Accuracy: {val_accuracy:.2f}%\n')
 
-    test_loss, test_accuracy, test_f1, test_roc_auc = test_model(model_1, test_loader, criterion, config['device'], config['num_classes'])
-    print(f'Fold {fold}, Test Loss: {test_loss:.4f}, Test Accuracy: {test_accuracy:.2f}%, F1 Score: {test_f1:.2f}, ROC AUC: {test_roc_auc:.2f}')
-    wandb.log({'test_loss': test_loss, 'test_accuracy': test_accuracy, 'test_f1': test_f1, 'test_roc_auc': test_roc_auc})
+        test_loss, test_accuracy, test_f1, test_roc_auc = test_model(model_1, test_loader, criterion, config['device'], config['num_classes'])
+        print(f'Fold {fold}, Test Loss: {test_loss:.4f}, Test Accuracy: {test_accuracy:.2f}%, F1 Score: {test_f1:.2f}, ROC AUC: {test_roc_auc:.2f}')
+        wandb.log({'test_loss': test_loss, 'test_accuracy': test_accuracy, 'test_f1': test_f1, 'test_roc_auc': test_roc_auc})
 
-    wandb.finish()
-       
+        wandb.finish()
 
 #Architecture 1 : After using dropout, early stopping and regularization
 def arch1_exp2():
-    from itertools import cycle
-import wandb
+    config = common_config.copy()
+    config.update({
+        'patience': 20,
+    })
 
-wandb.login()
-
-config = {
-    'num_epochs': 100,
-    'k_folds': 5,
-    'num_classes': 10,
-    'batch_size': 32,
-    'learning_rate': 1e-3,
-    'device': torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-    'input_length': 16000,
-    'num_workers': 2
-}
-
-patience = 20
-
-for fold in range(1, config['k_folds'] + 1):
-    if fold == 1:
-        continue
-
-    wandb.init(project='audio_classification_assn2', entity='m23csa001', config=config, name=f'CNN(Dr,ES,Re) Fold {fold}', reinit=True)
+    for fold in range(1, config['k_folds'] + 1):
+        if fold == 1:
+            continue
+        wandb.init(project='audio_classification_assn2', entity='m23csa001', config=config, name=f'CNN(Dr,ES,Re) Fold {fold}', reinit=True)
 
     data_module = CustomDataModule(batch_size=config['batch_size'],
                                    num_workers=config['num_workers'],
@@ -160,31 +160,14 @@ for fold in range(1, config['k_folds'] + 1):
 #Exp 1 : Num heads = 1
 
 def arch2_exp1():
-    from itertools import cycle
+    config = common_config.copy()
+    config.update({
+        'num_heads': 1,
+    })
 
-import wandb
-# Initialize Weights & Biases
-wandb.login()
-
-config = {
-    'num_epochs': 100,
-    'k_folds': 5,
-    'num_classes': 10,
-    'batch_size': 32,
-    'learning_rate': 1e-3,
-    'weight_decay': 1e-5,
-    'max_norm': 2.0,
-    'device': torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-    'input_length': 16000,
-    'embed_size': 512,
-    'num_heads': 1,
-    'num_encoder_layers': 3,
-    'num_workers':2
-}
-
-for fold in range(1, config['k_folds'] + 1):
-    if fold == 1:
-       continue
+   for fold in range(1, config['k_folds'] + 1):
+     if fold == 1:
+        continue
 
     wandb.init(project='audio_classification_assn2', entity='m23csa001',config=config, name=f'NH = 1,Fold {fold}', reinit=True)
 
@@ -232,30 +215,14 @@ for fold in range(1, config['k_folds'] + 1):
 
 #Num head = 2
 def arch2_exp2():
-    from itertools import cycle
-
-import wandb
-wandb.login()
-
-config = {
-    'num_epochs': 100,
-    'k_folds': 5,
-    'num_classes': 10,
-    'batch_size': 32,
-    'learning_rate': 1e-3,
-    'weight_decay': 1e-5,
-    'max_norm': 2.0,
-    'device': torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-    'input_length': 16000,
-    'embed_size': 512,
-    'num_heads': 2,
-    'num_encoder_layers': 3,
-    'num_workers':2
-}
-
-for fold in range(1, config['k_folds'] + 1):
-    if fold == 1:
-       continue
+    config = common_config.copy()
+    config.update({
+        'num_heads': 2,
+    })
+  
+    for fold in range(1, config['k_folds'] + 1):
+      if fold == 1:
+        continue
 
     wandb.init(project='audio_classification_assn2', entity='m23csa001',config=config, name=f'NH = 1,Fold {fold}', reinit=True)
 
@@ -303,29 +270,13 @@ for fold in range(1, config['k_folds'] + 1):
 
 #Num head = 4
 def arch2_exp3():
-    from itertools import cycle
+    config = common_config.copy()
+    config.update({
+        'num_heads': 2,
+    })
 
-import wandb
-wandb.login()
-
-config = {
-    'num_epochs': 100,
-    'k_folds': 5,
-    'num_classes': 10,
-    'batch_size': 32,
-    'learning_rate': 1e-3,
-    'weight_decay': 1e-5,
-    'max_norm': 2.0,
-    'device': torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-    'input_length': 16000,
-    'embed_size': 512,
-    'num_heads': 4,
-    'num_encoder_layers': 3,
-    'num_workers':2
-}
-
-for fold in range(1, config['k_folds'] + 1):
-    if fold == 1:
+   for fold in range(1, config['k_folds'] + 1):
+     if fold == 1:
        continue
 
     wandb.init(project='audio_classification_assn2', entity='m23csa001',config=config, name=f'NH = 1,Fold {fold}', reinit=True)
@@ -373,33 +324,15 @@ for fold in range(1, config['k_folds'] + 1):
 
 #Experiment 4 : Max norm = 1.5 , learning rate scheduler and optimizer as AdamW
 def arch2_exp4():
-    from itertools import cycle
-import torch
-import torch.nn as nn
-import torch.optim as optim
-from torch.optim.lr_scheduler import ReduceLROnPlateau
-import wandb
+    config = common_config.copy()
+    config.update({
+        'max_norm': 1.5,
+        'num_heads': 2    
+    })
 
-wandb.login()
 
-config = {
-    'num_epochs': 100,
-    'k_folds': 5,
-    'num_classes': 10,
-    'batch_size': 32,
-    'learning_rate': 1e-3,
-    'weight_decay': 1e-5,
-    'max_norm': 1.5,  # Updated max_norm
-    'device': torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-    'input_length': 16000,
-    'embed_size': 512,
-    'num_heads': 4,
-    'num_encoder_layers': 3,
-    'num_workers': 2
-}
-
-for fold in range(1, config['k_folds'] + 1):
-    if fold == 1:
+    for fold in range(1, config['k_folds'] + 1):
+      if fold == 1:
         continue
 
     wandb.init(project='audio_classification_assn2', entity='m23csa001', config=config, name=f'NH = 1, Fold {fold}', reinit=True)
