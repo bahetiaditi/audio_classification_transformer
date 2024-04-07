@@ -1,9 +1,0 @@
-lightning==1.4.0
-wandb
-torchaudio
-pandas
-numpy
-matplotlib
-seaborn
-scikit-learn
-pytorch==1.8.1
